@@ -1,13 +1,13 @@
 # ─── Project-specific ignores ──────────────────────────────────────────
-/data/                     # raw & processed datasets
-**/BoneTumor-MultiTask/  # multi-task experiment artefacts
-**/btxrd_ready/          # pre-baked BTXRD dataset
-/checkpoints*/             # any folder whose name starts with “checkpoints”
-/wandb/                    # local Weights & Biases logs
+data/                 
+**/BoneTumor-MultiTask/ 
+**/btxrd_ready/          
+checkpoints*/             
+wandb/                    
 
 # (optional but usually handy)
-*.ckpt                     # Lightning/YOLO checkpoints
-*.pt                       # PyTorch model weights
+*.ckpt                     
+*.pt                
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
