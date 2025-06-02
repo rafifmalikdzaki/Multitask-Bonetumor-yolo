@@ -9,7 +9,20 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
 )
+
+from torchmetrics.classification import (
+    BinaryPrecision,
+    BinaryRecall,
+    BinaryAccuracy,
+)
+from torchmetrics.segmentation import (
+    DiceScore,  # Dice Coefficient
+)
+
+import matplotlib
 import matplotlib.pyplot as plt
+matplotlib.use('Agg')
+
 import io
 import time  # For timing diagnostics
 from typing import List
@@ -33,11 +46,11 @@ import wandb
 from PIL import Image
 
 # These constants can be tuned project‑wide in one place.
-LOG_FREQ_TRAIN = 200  # images – keep low to avoid W&B quota burn‑up
-MAX_VIZ_PER_CALL = 4  # safeguards against logging massive batches unintentionally
+LOG_FREQ_TRAIN = 100  # images – keep low to avoid W&B quota burn‑up
+MAX_VIZ_PER_CALL = 10  # safeguards against logging massive batches unintentionally
 CONF_TH = 0.05  # confidence threshold
 NMS_IOU = 0.6  # IoU for NMS
-TOP_K = 300  # keep at most K boxes/image
+TOP_K = 300 # keep at most K boxes/image
 
 
 def _img_to_uint8(img: torch.Tensor) -> np.ndarray:
@@ -202,6 +215,11 @@ class MultiTaskLitModel(pl.LightningModule):
             num_classes=self.hparams.num_img_classes, normalize="true"
         )
 
+        self.val_seg_prec = BinaryPrecision(
+            threshold=0.5,  # assume we threshold the sigmoid at 0.5
+            dist_sync_on_step=True,
+        )
+
         self.val_seg_f1 = TorchMetricsF1Score(task="binary", dist_sync_on_step=True)
         # ── Fast metric ─────────────────────────────────────────────────────────
         # • single IoU threshold (0.50)  ➜ ≈10 × faster than the full curve
@@ -240,6 +258,13 @@ class MultiTaskLitModel(pl.LightningModule):
         self.reg_max = (
             self.net.detect.reg_max if hasattr(self.net.detect, "reg_max") else 16
         )
+
+        # ── NEW: segmentation‐only metrics ────────────────────────────────────
+        # We want pixel‐wise Precision, Recall, Accuracy, Dice, and Jaccard (IoU)
+        self.val_seg_prec = BinaryPrecision(threshold=0.5, dist_sync_on_step=True)
+        self.val_seg_rec = BinaryRecall(threshold=0.5, dist_sync_on_step=True)
+        self.val_seg_acc = BinaryAccuracy(threshold=0.5, dist_sync_on_step=True)
+        self.val_seg_dice = DiceScore(num_classes=1, dist_sync_on_step=True)
 
         self.img_class_names = {
             i: f"imgC{i}" for i in range(self.hparams.num_img_classes)
@@ -575,7 +600,7 @@ class MultiTaskLitModel(pl.LightningModule):
                     img_cls_logits_pred,
                     img_cls_gt,
                     class_id_to_name=self.img_class_names,  # Use your class name mapping
-                    stage="train",
+                    log_prefix="train_step/cls",
                     step=self.global_step,
                 )
 
@@ -643,7 +668,7 @@ class MultiTaskLitModel(pl.LightningModule):
         # class_id_to_name=self.img_class_names,
         # stage="val_batch", step=self.global_step) # Logged per batch
 
-        # Segmentation F1 score (remains the same)
+        # ── UPDATED: segmentation F1 + precision + recall + accuracy + IoU + Dice ──
         if len(seg_outputs) == 3:
             actual_protos_tensor_val = seg_outputs[2]
         elif (
@@ -652,29 +677,40 @@ class MultiTaskLitModel(pl.LightningModule):
             and len(seg_outputs[1]) == 2
         ):
             _, (_, actual_protos_tensor_val) = seg_outputs
-        # ... (rest of seg_f1 logic) ...
         else:
-            print(
-                f"Warning: Unexpected seg_outputs structure in validation_step for seg_f1."
-            )
-            actual_protos_tensor_val = None  # Handle appropriately
+            actual_protos_tensor_val = None
 
         if (
-            actual_protos_tensor_val is not None
-            and isinstance(actual_protos_tensor_val, torch.Tensor)
+            isinstance(actual_protos_tensor_val, torch.Tensor)
             and actual_protos_tensor_val.ndim == 4
             and actual_protos_tensor_val.shape[1] == self.hparams.proto_ch
         ):
+            # (1) Project prototypes to a single‐channel mask logit
             seg_logits_projected_val = self.seg_proto_projector(
                 actual_protos_tensor_val
             )
+
+            # (2) Upsample to (img_size, img_size)
             seg_logits_resized_val = F.interpolate(
                 seg_logits_projected_val,
                 size=(self.hparams.img_size, self.hparams.img_size),
                 mode="bilinear",
                 align_corners=False,
             )
-            self.val_seg_f1.update(seg_logits_resized_val.sigmoid(), masks_gt.int())
+
+            # (3) Sigmoid → binary mask (threshold = 0.5)
+            seg_probs = seg_logits_resized_val.sigmoid()
+            seg_preds = (seg_probs > 0.5).int()  # shape [B, 1, H, W]
+            seg_gt = (
+                masks_gt.int()
+            )  # assume masks_gt is already [B,1,H,W] with values in {0,1}
+
+            # (4) Update **all** segmentation metrics
+            self.val_seg_f1.update(seg_preds, seg_gt)
+            self.val_seg_prec.update(seg_preds, seg_gt)
+            self.val_seg_rec.update(seg_preds, seg_gt)
+            self.val_seg_acc.update(seg_preds, seg_gt)
+            self.val_seg_dice.update(seg_preds, seg_gt)
         else:
             print(
                 f"Warning: Skipping F1 update due to issues with actual_protos_tensor_val for seg_f1."
@@ -738,23 +774,27 @@ class MultiTaskLitModel(pl.LightningModule):
                 cls_logits_v.sigmoid()
             )  # List of [B, N_level, Nc_det]
 
-            # Post-process per image in the batch
+        # 5b) For each image in the batch, concatenate all levels, apply CONF_TH, NMS → fill lists:
         for b_val_idx in range(batch_size_val):
-            # -------- 1) concat predictions from all feature levels ------------
+            # (i) concatenate boxes & scores across all levels → [N_all, 4] and [N_all, nc_det]
             item_boxes = torch.cat(
                 [lvl[b_val_idx] for lvl in pred_boxes_batch_list], dim=0
-            )  # [N, 4]
-            item_cls_scores = torch.cat(
+            )
+            item_scores = torch.cat(
                 [lvl[b_val_idx] for lvl in pred_cls_scores_batch_list], dim=0
-            )  # [N, Nc]
+            )
 
-            # -------- 2) pick best class per box -------------------------------
-            item_top_scores, item_top_labels = item_cls_scores.max(dim=1)  # [N]
+            # (ii) pick the highest‐scoring class for each box → top_scores [N_all], top_labels [N_all]
+            top_scores, top_labels = item_scores.max(dim=1)
 
-            # -------- 3) conf-threshold & clamp -------------------------------
-            keep = item_top_scores > CONF_TH
-            if keep.sum() == 0:
-                # no predictions – push empties and move on
+            # (iii) filter by CONF_TH
+            keep_mask = top_scores > CONF_TH
+            if keep_mask.sum() > 0:
+                item_boxes = item_boxes[keep_mask].clamp_(0, self.hparams.img_size)
+                item_top_scores = top_scores[keep_mask]
+                item_top_labels = top_labels[keep_mask]
+            else:
+                # No boxes above threshold → append empty preds and empty targets (for consistency)
                 map_preds_for_metric.append(
                     {
                         "boxes": torch.empty((0, 4), device="cpu"),
@@ -763,27 +803,30 @@ class MultiTaskLitModel(pl.LightningModule):
                     }
                 )
                 det_preds_for_log.append(torch.empty((0, 6), device=current_device_val))
-            else:
-                item_boxes = item_boxes[keep].clamp_(0, self.hparams.img_size)
-                item_top_scores = item_top_scores[keep]
-            item_top_labels = item_top_labels[keep]
 
-            # -------- 4) per-image NMS + top-K -----------------------------
+                map_targets_for_metric.append(
+                    {
+                        "boxes": torch.empty((0, 4), device="cpu"),
+                        "labels": torch.empty((0,), device="cpu", dtype=torch.long),
+                    }
+                )
+                det_gts_for_log.append(torch.empty((0, 5), device=current_device_val))
+                continue
+
+            # (iv) non‐max suppression (NMS) and keep top‐K
             keep_idx = torchvision.ops.nms(item_boxes, item_top_scores, NMS_IOU)[:TOP_K]
             item_boxes = item_boxes[keep_idx]
             item_top_scores = item_top_scores[keep_idx]
             item_top_labels = item_top_labels[keep_idx]
 
-            # ----- mAP input (CPU tensors) ---------------------------------
+            # (v) Append to map_preds_for_metric (must be CPU tensors!)
             map_preds_for_metric.append(
                 {
                     "boxes": item_boxes.cpu(),
                     "scores": item_top_scores.cpu(),
-                    "labels": item_top_labels.cpu(),
+                    "labels": item_top_labels.cpu().long(),
                 }
             )
-
-            # ----- logger input (GPU OK) -----------------------------------
             det_preds_for_log.append(
                 torch.cat(
                     [
@@ -795,69 +838,80 @@ class MultiTaskLitModel(pl.LightningModule):
                 )
             )
 
-        # ----------------- 5) build ground-truth ---------------------------
-        gt_mask = det_boxes_gt[:, 0] == b_val_idx
-        gt_this = det_boxes_gt[gt_mask]
+            # (vi) Build the ground‐truth dict for this image
+            gt_mask = det_boxes_gt[:, 0] == b_val_idx
+            gt_this = det_boxes_gt[
+                gt_mask
+            ]  # shape [G, 6] where [:, 2:6] = cx, cy, w, h
 
-        if gt_this.numel() > 0:
-            gt_cxywh = gt_this[:, 2:6]
-            gt_xyxy = (
-                torch.cat(
-                    [
-                        (gt_cxywh[:, 0] - gt_cxywh[:, 2] / 2) * self.hparams.img_size,
-                        (gt_cxywh[:, 1] - gt_cxywh[:, 3] / 2) * self.hparams.img_size,
-                        (gt_cxywh[:, 0] + gt_cxywh[:, 2] / 2) * self.hparams.img_size,
-                        (gt_cxywh[:, 1] + gt_cxywh[:, 3] / 2) * self.hparams.img_size,
-                    ],
-                    dim=-1,
-                )
-                .view(-1, 4)
-                .clamp_(0, self.hparams.img_size)
-            )
-
-            gt_labels = gt_this[:, 1].long()
-            map_targets_for_metric.append(
-                {"boxes": gt_xyxy.cpu(), "labels": gt_labels.cpu()}
-            )
-
-            det_gts_for_log.append(
-                torch.cat([gt_xyxy, gt_labels.unsqueeze(1).float()], dim=1)
-            )
-        else:
-            map_targets_for_metric.append(
-                {
-                    "boxes": torch.empty((0, 4), device="cpu"),
-                    "labels": torch.empty((0,), device="cpu", dtype=torch.long),
-                }
-            )
-            det_gts_for_log.append(torch.empty((0, 5), device=current_device_val))
-            if map_preds_for_metric and map_targets_for_metric:
-                self.val_map_iou50.update(map_preds_for_metric, map_targets_for_metric)
-                if (self.current_epoch % MAP_FULL_FREQ) == 0:
-                    self.val_map_iou50_95.update(
-                        map_preds_for_metric, map_targets_for_metric
+            if gt_this.numel() > 0:
+                gt_cxywh_norm = gt_this[:, 2:6]
+                gt_xyxy = (
+                    torch.cat(
+                        [
+                            (gt_cxywh_norm[:, 0] - gt_cxywh_norm[:, 2] / 2)
+                            * self.hparams.img_size,
+                            (gt_cxywh_norm[:, 1] - gt_cxywh_norm[:, 3] / 2)
+                            * self.hparams.img_size,
+                            (gt_cxywh_norm[:, 0] + gt_cxywh_norm[:, 2] / 2)
+                            * self.hparams.img_size,
+                            (gt_cxywh_norm[:, 1] + gt_cxywh_norm[:, 3] / 2)
+                            * self.hparams.img_size,
+                        ],
+                        dim=-1,
                     )
+                    .view(-1, 4)
+                    .clamp_(0, self.hparams.img_size)
+                )
 
-            self.log_dict(
-                {
-                    "val/loss_total": total_loss,
-                    "val/loss_seg": loss_s,
-                    "val/loss_box_iou": loss_b_iou,
-                    "val/loss_dfl": loss_dfl,
-                    "val/loss_det_cls": loss_c_det,
-                    "val/loss_img_cls": loss_icls,
-                },
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=True,
-            )
+                gt_labels = gt_this[:, 1].long()  # shape [G]
+                map_targets_for_metric.append(
+                    {"boxes": gt_xyxy.cpu(), "labels": gt_labels.cpu()}
+                )
+                det_gts_for_log.append(
+                    torch.cat([gt_xyxy, gt_labels.unsqueeze(1).float()], dim=1)
+                )
+            else:
+                # If an image truly has zero GT, append an empty target
+                map_targets_for_metric.append(
+                    {
+                        "boxes": torch.empty((0, 4), device="cpu"),
+                        "labels": torch.empty((0,), device="cpu", dtype=torch.long),
+                    }
+                )
+                det_gts_for_log.append(torch.empty((0, 5), device=current_device_val))
 
-        # Log detection examples using the new logger
-        if batch_idx == 0 and self.current_epoch % self.hparams.box_log_period == 0:
+        if (
+            len(map_preds_for_metric) == batch_size_val
+            and len(map_targets_for_metric) == batch_size_val
+        ):
+            self.val_map_iou50.update(map_preds_for_metric, map_targets_for_metric)
+            if (self.current_epoch % MAP_FULL_FREQ) == 0:
+                self.val_map_iou50_95.update(
+                    map_preds_for_metric, map_targets_for_metric
+                )
+
+        # 7) Log the validation losses (unchanged)
+        self.log_dict(
+            {
+                "val/loss_total": total_loss,
+                "val/loss_seg": loss_s,
+                "val/loss_box_iou": loss_b_iou,
+                "val/loss_dfl": loss_dfl,
+                "val/loss_det_cls": loss_c_det,
+                "val/loss_img_cls": loss_icls,
+            },
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        # 8) Log detection examples (first batch of the epoch only)
+        if batch_idx == 0 and (self.current_epoch % self.hparams.box_log_period == 0):
             if self.logger and hasattr(self.logger.experiment, "log"):
-                if det_preds_for_log:  # Check if there's something to log
+                if det_preds_for_log:
                     log_det_examples(
                         self.logger,
                         imgs,
@@ -869,10 +923,9 @@ class MultiTaskLitModel(pl.LightningModule):
                         conf_th=self.hparams.det_conf_thresh_viz,
                         max_samples=MAX_VIZ_PER_CALL,
                     )
-        # Log segmentation examples for validation (first batch only)
-        if (
-            batch_idx == 0 and self.current_epoch % self.hparams.mask_log_period == 0
-        ):  # Or a different val log period
+
+        # 9) Log segmentation examples (first batch of the epoch only)
+        if batch_idx == 0 and (self.current_epoch % self.hparams.mask_log_period == 0):
             if (
                 self.logger
                 and hasattr(self.logger.experiment, "log")
@@ -888,18 +941,7 @@ class MultiTaskLitModel(pl.LightningModule):
                     max_samples=MAX_VIZ_PER_CALL,
                 )
 
-        # Manually commit if any loggers used commit=False
-        if (
-            self.logger
-            and hasattr(self.logger.experiment, "log")
-            and batch_idx == 0
-            and (
-                self.current_epoch % self.hparams.box_log_period == 0
-                or self.current_epoch % self.hparams.mask_log_period == 0
-            )
-        ):  # Check other conditions if val batch cls metrics are logged
-            self.logger.experiment.log({}, commit=True, step=self.global_step)
-
+        # 10) Return the loss so PyTorch Lightning can aggregate it
         return total_loss
 
     def on_train_epoch_end(self):
@@ -1097,6 +1139,24 @@ class MultiTaskLitModel(pl.LightningModule):
             f"  Logged val_epoch/det_confusion_matrix_epoch (took {time.time() - current_op_time:.4f}s)"
         )
 
+        seg_precision = self.val_seg_prec.compute()
+        seg_recall = self.val_seg_rec.compute()
+        seg_accuracy = self.val_seg_acc.compute()
+        seg_dice = self.val_seg_dice.compute()
+
+        self.log_dict(
+            {
+                "val_epoch/seg_precision_epoch": seg_precision,
+                "val_epoch/seg_recall_epoch": seg_recall,
+                "val_epoch/seg_accuracy_epoch": seg_accuracy,
+                "val_epoch/seg_dice_epoch": seg_dice,
+            },
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        # ── Always reset these five segmentation metrics ─────────────────────────
         # Reset metrics
         current_op_time = time.time()
         print("  Resetting metrics...")
@@ -1106,6 +1166,10 @@ class MultiTaskLitModel(pl.LightningModule):
         self.val_map_iou50_95.reset()
         self.val_map_iou50.reset()
         self.val_det_cm.reset()
+        self.val_seg_prec.reset()
+        self.val_seg_rec.reset()
+        self.val_seg_acc.reset()
+        self.val_seg_dice.reset()
         self.temp_matched_preds_for_cm = []  # Crucial to clear for the next validation epoch
         print(f"    Metrics reset. (took {time.time() - current_op_time:.4f}s)")
         print(
@@ -1183,34 +1247,34 @@ if __name__ == "__main__":
     BATCH_SIZE = 4  # Reduce if OOM, try 2 or 1
     NUM_WORKERS = 2  # Reduce if issues, try 0
     LEARNING_RATE = 1e-4
-    MAX_EPOCHS = 100
+    MAX_EPOCHS = 500
     NC_DET = 2  # Number of detection classes
     NUM_IMG_CLASSES = 2  # Number of image classification classes
     PROTO_CH = 32
     IOU_MATCH_THRESH = 0.5  # For assigning positive anchors in loss
     LOSS_WEIGHT_SEG = 1.0
-    LOSS_WEIGHT_BOX_IOU = 7.5
+    LOSS_WEIGHT_BOX_IOU = 3.5
     LOSS_WEIGHT_DFL = 1.5
     LOSS_WEIGHT_CLS_DET = 0.5
     LOSS_WEIGHT_IMG_CLS = 1.0
-    MASK_LOG_PERIOD = 10  # Log segmentation masks every N global steps
-    BOX_LOG_PERIOD = 10  # Log detection examples every N validation epochs
-    DET_CONF_THRESH_VIZ = 0.1  # Confidence threshold for visualizing detection boxes
-    MAP_MAX_DETECTIONS = 300
+    MASK_LOG_PERIOD = 50  # Log segmentation masks every N global steps
+    BOX_LOG_PERIOD = 50  # Log detection examples every N validation epochs
+    DET_CONF_THRESH_VIZ = 0.25  # Confidence threshold for visualizing detection boxes
+    MAP_MAX_DETECTIONS = 100
     MAP_FULL_FREQ = 5
     # Check if your dataset has more objects per image on average.
     # Setting to a single value applies it across all recall thresholds.
     # Or use [100, 100, 100] if you want to match the previous [self.hparams.map_max_detections]*3
 
     wandb_logger = WandbLogger(
-        project="BTXRD-MultiTask-AdvancedMetrics-v2", log_model="all"
+        project="BTXRD-MultiTask-AdvancedMetrics-v2", log_model=False
     )  # New project name or version
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
     model_checkpoint = ModelCheckpoint(
         dirpath=f"checkpoints_wandb_{wandb_logger.version if wandb_logger.version else 'local'}",
         filename="btrxd-multitask-{epoch:02d}-{val/loss_total:.2f}-{val_epoch_map_iou50_95/map:.3f}",  # Added mAP to filename
-        save_top_k=3,
+        save_top_k=2,
         monitor="val_epoch_map_iou50/map",  # Monitor mAP for checkpointing
         mode="max",  # mAP is maximized
         save_last=True,
@@ -1223,7 +1287,7 @@ if __name__ == "__main__":
 
     early_stopping = EarlyStopping(
         monitor="val_epoch_map_iou50/map",  # Monitor mAP for early stopping
-        patience=20,
+        patience=50,
         mode="max",  # mAP is maximized
         verbose=True,
     )

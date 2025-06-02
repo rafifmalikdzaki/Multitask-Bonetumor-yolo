@@ -326,9 +326,9 @@ if __name__ == "__main__":
         if n_train + n_val == 0:
             continue
         actual_ratio = n_train / (n_train + n_val)
-        assert abs(actual_ratio - train_ratio) < 0.01, (
-            f"class {cls}: expected ~{train_ratio:.2f}, got {actual_ratio:.2f}"
-        )
+        assert (
+            abs(actual_ratio - train_ratio) < 0.01
+        ), f"class {cls}: expected ~{train_ratio:.2f}, got {actual_ratio:.2f}"
     print("✔️  stratified split passes ratio check")
 
     # Print one sample from each split
