@@ -1,4 +1,4 @@
-import torch 
+import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from ultralytics import YOLO
@@ -28,9 +28,14 @@ print(criterion)
 classification_loss_fn = torch.nn.CrossEntropyLoss()
 
 # Data loaders
-train_loader = DataLoader(BTXRD(split="train"), batch_size=4, shuffle=True, collate_fn=collate_fn)
-val_loader = DataLoader(BTXRD(split="val"), batch_size=4, shuffle=False, collate_fn=collate_fn)
+train_loader = DataLoader(
+    BTXRD(split="train"), batch_size=4, shuffle=True, collate_fn=collate_fn
+)
+val_loader = DataLoader(
+    BTXRD(split="val"), batch_size=4, shuffle=False, collate_fn=collate_fn
+)
 print("Data Ready!")
+
 
 def train_one_epoch(model, loader, optimizer, criterion):
     model.train()
@@ -61,6 +66,7 @@ def train_one_epoch(model, loader, optimizer, criterion):
         total_loss += loss.item()
     return total_loss / len(loader)
 
+
 def validate(model, loader, criterion):
     model.eval()
     total_loss = 0
@@ -88,6 +94,7 @@ def validate(model, loader, criterion):
     avg_loss = total_loss / len(loader)
     accuracy = correct / total
     return avg_loss, accuracy
+
 
 # Training loop
 epochs = 20

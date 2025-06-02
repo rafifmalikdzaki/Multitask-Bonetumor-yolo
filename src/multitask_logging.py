@@ -57,6 +57,7 @@ except Exception:
 #  Utilities
 # ----------------------------------------------------------------------------
 
+
 def _img_to_uint8(img: torch.Tensor) -> np.ndarray:
     """Convert CHW tensor in −1…1 *or* 0…1 → HWC uint8 (0‑255)."""
     if img.dim() != 3:
@@ -67,22 +68,23 @@ def _img_to_uint8(img: torch.Tensor) -> np.ndarray:
     img = (img.clamp(0, 1) * 255).byte()
     return img.permute(1, 2, 0).numpy()
 
+
 # ----------------------------------------------------------------------------
 #  💬 1. Segmentation examples (unchanged)
 # ----------------------------------------------------------------------------
 
+
 def log_seg_examples(
     logger: "pl.loggers.WandbLogger",
-    images: torch.Tensor,                 # B×C×H×W
-    logits: torch.Tensor,                 # B×1×H×W (pre‑sigmoid)
+    images: torch.Tensor,  # B×C×H×W
+    logits: torch.Tensor,  # B×1×H×W (pre‑sigmoid)
     *,
     masks_gt: Optional[torch.Tensor] = None,  # same shape as logits or None
     stage: str = "val",
-    step: Optional[int] = None,              # explicitly control wandb step
+    step: Optional[int] = None,  # explicitly control wandb step
     threshold: float = 0.5,
     max_samples: int = 4,
 ) -> None:
-
     if not hasattr(logger, "experiment"):
         raise RuntimeError("Expecting a Lightning WandbLogger instance.")
     run = logger.experiment  # type: ignore[attr-defined]
@@ -106,26 +108,29 @@ def log_seg_examples(
 
     run.log({f"seg_examples_{stage}": wb_imgs}, step=step, commit=False)
 
+
 # ----------------------------------------------------------------------------
 #  💬 2. Detection examples (unchanged)
 # ----------------------------------------------------------------------------
 
 _Box = Mapping[str, Any]
 
+
 def _tensor_boxes_to_wb(
     boxes_xyxy: torch.Tensor,  # N×4
-    scores: torch.Tensor,      # N
-    labels: torch.Tensor,      # N
+    scores: torch.Tensor,  # N
+    labels: torch.Tensor,  # N
     class_id_to_name: Mapping[int, str],
     caption_prefix: str = "pred",
 ) -> List[_Box]:
-
     boxes_xyxy = boxes_xyxy.detach().cpu()
     scores = scores.detach().cpu()
     labels = labels.detach().cpu()
 
     out: List[_Box] = []
-    for (x1, y1, x2, y2), s, l in zip(boxes_xyxy.tolist(), scores.tolist(), labels.tolist()):
+    for (x1, y1, x2, y2), s, l in zip(
+        boxes_xyxy.tolist(), scores.tolist(), labels.tolist()
+    ):
         out.append(
             {
                 "position": {
@@ -144,8 +149,8 @@ def _tensor_boxes_to_wb(
 
 def log_det_examples(
     logger: "pl.loggers.WandbLogger",
-    images: torch.Tensor,                      # B×C×H×W
-    preds: Sequence[torch.Tensor],             # len(B) list, each (N,6) xyxy+score+cls
+    images: torch.Tensor,  # B×C×H×W
+    preds: Sequence[torch.Tensor],  # len(B) list, each (N,6) xyxy+score+cls
     *,
     gts: Optional[Sequence[torch.Tensor]] = None,  # len(B), each (M,5) xyxy+cls
     class_id_to_name: Mapping[int, str],
@@ -155,7 +160,6 @@ def log_det_examples(
     max_samples: int = 4,
     max_boxes: int = 100,
 ) -> None:
-
     if not hasattr(logger, "experiment"):
         raise RuntimeError("Expecting a Lightning WandbLogger instance.")
     run = logger.experiment  # type: ignore[attr-defined]
@@ -197,11 +201,15 @@ def log_det_examples(
 
     run.log({f"det_examples_{stage}": wb_imgs}, step=step, commit=False)
 
+
 # ----------------------------------------------------------------------------
 #  💬 3. Classification‑head metrics (NEW)
 # ----------------------------------------------------------------------------
 
-def _simple_macro_prec_recall_f1(preds: torch.Tensor, target: torch.Tensor, num_classes: int):
+
+def _simple_macro_prec_recall_f1(
+    preds: torch.Tensor, target: torch.Tensor, num_classes: int
+):
     """Fallback in case torchmetrics is unavailable."""
     cm = torch.zeros((num_classes, num_classes), dtype=torch.int64)
     for p, t in zip(preds.tolist(), target.tolist()):
@@ -212,16 +220,20 @@ def _simple_macro_prec_recall_f1(preds: torch.Tensor, target: torch.Tensor, num_
     FN = cm.sum(1) - TP
 
     precision = torch.where(TP + FP == 0, torch.tensor(0.0), TP.float() / (TP + FP))
-    recall    = torch.where(TP + FN == 0, torch.tensor(0.0), TP.float() / (TP + FN))
-    f1        = torch.where(precision + recall == 0, torch.tensor(0.0), 2 * precision * recall / (precision + recall))
+    recall = torch.where(TP + FN == 0, torch.tensor(0.0), TP.float() / (TP + FN))
+    f1 = torch.where(
+        precision + recall == 0,
+        torch.tensor(0.0),
+        2 * precision * recall / (precision + recall),
+    )
 
     return precision.mean().item(), recall.mean().item(), f1.mean().item()
 
 
 def log_cls_metrics(
     logger: "pl.loggers.WandbLogger",
-    logits: torch.Tensor,                   # B×C (pre‑softmax)
-    labels: torch.Tensor,                   # B
+    logits: torch.Tensor,  # B×C (pre‑softmax)
+    labels: torch.Tensor,  # B
     *,
     class_id_to_name: Mapping[int, str] | None = None,  # optional for future use
     stage: str = "val",
@@ -235,15 +247,21 @@ def log_cls_metrics(
 
     preds = logits.softmax(dim=1).argmax(dim=1)
     labels = labels.detach().cpu()
-    preds  = preds.detach().cpu()
+    preds = preds.detach().cpu()
 
     num_classes = logits.shape[1]
     acc = (preds == labels).float().mean().item()
 
     if _has_tm:
-        precision = multiclass_precision(preds, labels, num_classes=num_classes, average="macro").item()
-        recall    = multiclass_recall  (preds, labels, num_classes=num_classes, average="macro").item()
-        f1        = multiclass_f1_score(preds, labels, num_classes=num_classes, average="macro").item()
+        precision = multiclass_precision(
+            preds, labels, num_classes=num_classes, average="macro"
+        ).item()
+        recall = multiclass_recall(
+            preds, labels, num_classes=num_classes, average="macro"
+        ).item()
+        f1 = multiclass_f1_score(
+            preds, labels, num_classes=num_classes, average="macro"
+        ).item()
     else:
         precision, recall, f1 = _simple_macro_prec_recall_f1(preds, labels, num_classes)
 

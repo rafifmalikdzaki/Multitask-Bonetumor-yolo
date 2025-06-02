@@ -8,10 +8,9 @@ from torch.utils.data import DataLoader
 
 
 class BTXRD(Dataset):
-    def __init__(self, root_dir="btxrd_ready",
-                 split='train',
-                 img_size=640,
-                 transform=None):  # transform is not used currently but kept for future
+    def __init__(
+        self, root_dir="btxrd_ready", split="train", img_size=640, transform=None
+    ):  # transform is not used currently but kept for future
         self.root_dir = Path(root_dir)
         self.img_dir = self.root_dir / "images"
         self.mask_dir = self.root_dir / "masks"
@@ -23,17 +22,21 @@ class BTXRD(Dataset):
 
         # Load image classification data
         try:
-            self.cls_rows = pd.read_csv(self.root_dir / "img_cls.csv", header=None,
-                                        names=['filename', 'class']).to_dict(orient='records')
-            self.cls_lookup = {r['filename']: r['class'] for r in self.cls_rows}
+            self.cls_rows = pd.read_csv(
+                self.root_dir / "img_cls.csv", header=None, names=["filename", "class"]
+            ).to_dict(orient="records")
+            self.cls_lookup = {r["filename"]: r["class"] for r in self.cls_rows}
         except FileNotFoundError:
-            print(f"Warning: img_cls.csv not found in {self.root_dir}. Image classification will not be available.")
+            print(
+                f"Warning: img_cls.csv not found in {self.root_dir}. Image classification will not be available."
+            )
             self.cls_lookup = {}
 
         self.items = []
         # Iterate through images and check for corresponding labels and masks
         for img_idx, img_path in enumerate(
-                sorted(self.img_dir.glob("*.jpeg"))):  # Assuming .jpeg, adjust if other extensions like .jpg, .png
+            sorted(self.img_dir.glob("*.jpeg"))
+        ):  # Assuming .jpeg, adjust if other extensions like .jpg, .png
             fname = img_path.name
             # Use .stem to get filename without extension for matching .txt and .png
             txt_path = self.det_dir / f"{img_path.stem}.txt"
@@ -42,25 +45,31 @@ class BTXRD(Dataset):
             if txt_path.exists() and msk_path.exists() and fname in self.cls_lookup:
                 class_id = self.cls_lookup[fname]
                 # Store original index, image path, label path, mask path, and class_id
-                self.items.append({'id': img_idx,
-                                   'img_path': img_path,
-                                   'txt_path': txt_path,
-                                   'msk_path': msk_path,
-                                   'class_id': class_id})
+                self.items.append(
+                    {
+                        "id": img_idx,
+                        "img_path": img_path,
+                        "txt_path": txt_path,
+                        "msk_path": msk_path,
+                        "class_id": class_id,
+                    }
+                )
             # else:
             #     print(f"Skipping {fname}: Missing txt/msk or class_id. TXT: {txt_path.exists()}, MSK: {msk_path.exists()}, CLS: {fname in self.cls_lookup}")
 
         # Split data into training and validation sets
         n = len(self.items)
         if n == 0:
-            print(f"Warning: No items loaded for split '{self.split}'. Check paths and file existence.")
+            print(
+                f"Warning: No items loaded for split '{self.split}'. Check paths and file existence."
+            )
 
         # Simple 80/20 split based on sorted order.
         # For more robust splitting, consider scikit-learn's train_test_split or pre-defined split files.
         split_idx = int(0.8 * n)
-        if self.split == 'train':
+        if self.split == "train":
             self.items = self.items[:split_idx]
-        elif self.split == 'val':
+        elif self.split == "val":
             self.items = self.items[split_idx:]
         else:  # Allow for a 'all' split or other custom splits if needed
             pass  # self.items remains all items
@@ -88,26 +97,42 @@ class BTXRD(Dataset):
         top_pad, left_pad = 0, 0  # No padding on top/left
 
         # Apply padding
-        img_letterboxed = cv2.copyMakeBorder(img_resized, top_pad, pad_h, left_pad, pad_w,
-                                             cv2.BORDER_CONSTANT, value=(114, 114, 114))  # Common padding color
-        mask_letterboxed = cv2.copyMakeBorder(mask_resized, top_pad, pad_h, left_pad, pad_w,
-                                              cv2.BORDER_CONSTANT, value=0)  # Pad mask with 0
+        img_letterboxed = cv2.copyMakeBorder(
+            img_resized,
+            top_pad,
+            pad_h,
+            left_pad,
+            pad_w,
+            cv2.BORDER_CONSTANT,
+            value=(114, 114, 114),
+        )  # Common padding color
+        mask_letterboxed = cv2.copyMakeBorder(
+            mask_resized, top_pad, pad_h, left_pad, pad_w, cv2.BORDER_CONSTANT, value=0
+        )  # Pad mask with 0
 
-        return img_letterboxed, mask_letterboxed, scale, left_pad, top_pad  # Return left_pad, top_pad for coord adjustment
+        return (
+            img_letterboxed,
+            mask_letterboxed,
+            scale,
+            left_pad,
+            top_pad,
+        )  # Return left_pad, top_pad for coord adjustment
 
     def __getitem__(self, idx):
         item_data = self.items[idx]
-        img_fp = str(item_data['img_path'])
-        txt_fp = item_data['txt_path']
-        msk_fp = str(item_data['msk_path'])
-        class_id = item_data['class_id']
-        original_idx = item_data['id']  # This is the 'id' to be returned
+        img_fp = str(item_data["img_path"])
+        txt_fp = item_data["txt_path"]
+        msk_fp = str(item_data["msk_path"])
+        class_id = item_data["class_id"]
+        original_idx = item_data["id"]  # This is the 'id' to be returned
 
         # Load image
         img = cv2.imread(img_fp)
         if img is None:
             raise FileNotFoundError(f"Image not found or corrupted: {img_fp}")
-        H0_orig, W0_orig = img.shape[:2]  # Original dimensions for YOLO coord denormalization
+        H0_orig, W0_orig = img.shape[
+            :2
+        ]  # Original dimensions for YOLO coord denormalization
 
         # Load mask (assuming it's a single-channel grayscale image, e.g., binary mask)
         mask = cv2.imread(msk_fp, cv2.IMREAD_GRAYSCALE)  # Read as grayscale
@@ -115,10 +140,14 @@ class BTXRD(Dataset):
             raise FileNotFoundError(f"Mask not found or corrupted: {msk_fp}")
 
         # Apply letterboxing
-        img_letterboxed, mask_letterboxed, scale, pad_l, pad_t = self._letterbox(img.copy(), mask.copy())
+        img_letterboxed, mask_letterboxed, scale, pad_l, pad_t = self._letterbox(
+            img.copy(), mask.copy()
+        )
 
         # Process image: BGR to RGB, normalize, permute to CHW
-        img_processed = cv2.cvtColor(img_letterboxed, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        img_processed = (
+            cv2.cvtColor(img_letterboxed, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        )
         img_t = torch.from_numpy(img_processed).permute(2, 0, 1)
 
         # Process mask: add channel dim, normalize (assuming mask values are 0 or 255)
@@ -173,11 +202,22 @@ class BTXRD(Dataset):
                 final_h_norm = np.clip(final_h_norm, 0.0, 1.0)
 
                 # First element is placeholder for batch index, set in collate_fn
-                det_rows.append([0.0, float(cls), final_xc_norm, final_yc_norm, final_w_norm, final_h_norm])
+                det_rows.append(
+                    [
+                        0.0,
+                        float(cls),
+                        final_xc_norm,
+                        final_yc_norm,
+                        final_w_norm,
+                        final_h_norm,
+                    ]
+                )
 
-        det_boxes = (torch.tensor(det_rows, dtype=torch.float32)
-                     if det_rows
-                     else torch.zeros((0, 6), dtype=torch.float32))
+        det_boxes = (
+            torch.tensor(det_rows, dtype=torch.float32)
+            if det_rows
+            else torch.zeros((0, 6), dtype=torch.float32)
+        )
 
         # Image-level classification
         img_cls = torch.tensor(class_id, dtype=torch.long)
@@ -193,14 +233,18 @@ def collate_fn(batch):
     imgs_stacked = torch.stack(imgs)
     masks_stacked = torch.stack(masks)
     # Ensure img_cls are tensors before stacking
-    img_cls_stacked = torch.stack([torch.as_tensor(c, dtype=torch.long) for c in img_cls_list])
+    img_cls_stacked = torch.stack(
+        [torch.as_tensor(c, dtype=torch.long) for c in img_cls_list]
+    )
 
     # Collate detection boxes (they have variable numbers per image)
     batch_det_boxes = []
     for i, boxes in enumerate(dets):  # i is the batch index for this item
         if boxes.numel() > 0:  # Check if there are any boxes
             # boxes_cloned = boxes.clone() # Not strictly necessary if original tensor is not modified elsewhere
-            boxes[:, 0] = float(i)  # Set the first column (batch_idx) to the current image's index in the batch
+            boxes[:, 0] = float(
+                i
+            )  # Set the first column (batch_idx) to the current image's index in the batch
             batch_det_boxes.append(boxes)
 
     if batch_det_boxes:
@@ -258,17 +302,23 @@ if __name__ == "__main__":
         print(f"Validation dataset size: {len(val_ds)}")
 
         if len(train_ds) > 0:
-            train_loader = DataLoader(train_ds, batch_size=4, shuffle=True,
-                                      num_workers=0,  # Set to 0 for easier debugging, >0 for parallel loading
-                                      pin_memory=True,
-                                      collate_fn=collate_fn)
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=4,
+                shuffle=True,
+                num_workers=0,  # Set to 0 for easier debugging, >0 for parallel loading
+                pin_memory=True,
+                collate_fn=collate_fn,
+            )
 
             print("\nIterating through one batch of train_loader...")
             ids_b, imgs_b, dets_b, masks_b, cls_b = next(iter(train_loader))
 
             print(f"Batch - IDs: {ids_b}")
             print(f"Batch - Images shape: {imgs_b.shape}, dtype: {imgs_b.dtype}")
-            print(f"Batch - Detection boxes shape: {dets_b.shape}, dtype: {dets_b.dtype}")
+            print(
+                f"Batch - Detection boxes shape: {dets_b.shape}, dtype: {dets_b.dtype}"
+            )
             if dets_b.numel() > 0:
                 print("Batch - Sample detection box (first one if any):")
                 from pprint import pprint
@@ -277,7 +327,8 @@ if __name__ == "__main__":
             else:
                 print("Batch - No detection boxes in this batch.")
             print(
-                f"Batch - Masks shape: {masks_b.shape}, dtype: {masks_b.dtype}, unique values (first mask): {torch.unique(masks_b[0]) if masks_b.numel() > 0 else 'N/A'}")
+                f"Batch - Masks shape: {masks_b.shape}, dtype: {masks_b.dtype}, unique values (first mask): {torch.unique(masks_b[0]) if masks_b.numel() > 0 else 'N/A'}"
+            )
             print(f"Batch - Image class IDs: {cls_b.tolist()}, dtype: {cls_b.dtype}")
 
             # Test one item from dataset directly
@@ -285,11 +336,15 @@ if __name__ == "__main__":
             original_idx_s, img_s, det_s, mask_s, cls_s = train_ds[0]
             print(f"Sample - Original Index: {original_idx_s}")
             print(f"Sample - Image shape: {img_s.shape}, dtype: {img_s.dtype}")
-            print(f"Sample - Detection boxes shape: {det_s.shape}, dtype: {det_s.dtype}")
+            print(
+                f"Sample - Detection boxes shape: {det_s.shape}, dtype: {det_s.dtype}"
+            )
             if det_s.numel() > 0:
                 print("Sample - Detection boxes (first one if any):")
                 pprint(det_s[0].tolist())
-            print(f"Sample - Mask shape: {mask_s.shape}, dtype: {mask_s.dtype}, unique values: {torch.unique(mask_s)}")
+            print(
+                f"Sample - Mask shape: {mask_s.shape}, dtype: {mask_s.dtype}, unique values: {torch.unique(mask_s)}"
+            )
             print(f"Sample - Image class ID: {cls_s.item()}, dtype: {cls_s.dtype}")
 
         else:
@@ -305,4 +360,3 @@ if __name__ == "__main__":
     # import shutil
     # shutil.rmtree(dummy_root)
     # print(f"Cleaned up dummy data directory: {dummy_root}")
-

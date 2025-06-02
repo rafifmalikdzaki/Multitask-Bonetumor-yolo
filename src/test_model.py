@@ -10,15 +10,18 @@ from main_model import ConvNeXtBiFPNYOLO, load_pretrained_heads
 from light import MultiTaskLitModel
 import numpy as np
 
+
 # ------------------------------- Evaluation Helpers ----------------------------------
 def compute_iou(preds, targets, eps=1e-7):
     inter = (preds & targets).float().sum((1, 2))
     union = (preds | targets).float().sum((1, 2))
     return (inter + eps) / (union + eps)
 
+
 def compute_dice(preds, targets, eps=1e-7):
     inter = (preds & targets).float().sum((1, 2))
     return (2 * inter + eps) / (preds.sum((1, 2)) + targets.sum((1, 2)) + eps)
+
 
 # ------------------------------- Data and Model Loading ----------------------------------
 class BTXRDTestModule(pl.LightningDataModule):
@@ -32,8 +35,15 @@ class BTXRDTestModule(pl.LightningDataModule):
         self.test_set = BTXRD(self.root, split="test", img_size=640)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.batch_size, shuffle=False,
-                          num_workers=self.num_workers, collate_fn=collate_fn, pin_memory=True)
+        return DataLoader(
+            self.test_set,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
+
 
 # ------------------------------- Evaluation Script ----------------------------------
 def evaluate():
@@ -69,7 +79,9 @@ def evaluate():
             # Segmentation evaluation
             _, coeffs, protos = seg_out
             seg_pred = torch.einsum("bqc,bchw->bqhw", coeffs, protos)
-            seg_pred = F.interpolate(seg_pred, size=masks.shape[2:], mode="bilinear", align_corners=False)
+            seg_pred = F.interpolate(
+                seg_pred, size=masks.shape[2:], mode="bilinear", align_corners=False
+            )
             seg_pred = torch.sigmoid(seg_pred) > 0.5
 
             seg_iou = compute_iou(seg_pred[:, 0], masks[:, 0].bool()).mean().item()
@@ -85,9 +97,9 @@ def evaluate():
     # ------------------ Classification ------------------
     print("\nClassification Report:")
     print("Accuracy:", accuracy_score(cls_targets, cls_preds))
-    print("Precision:", precision_score(cls_targets, cls_preds, average='micro'))
-    print("Recall:", recall_score(cls_targets, cls_preds, average='micro'))
-    print("F1 Score:", f1_score(cls_targets, cls_preds, average='micro'))
+    print("Precision:", precision_score(cls_targets, cls_preds, average="micro"))
+    print("Recall:", recall_score(cls_targets, cls_preds, average="micro"))
+    print("F1 Score:", f1_score(cls_targets, cls_preds, average="micro"))
 
     # ------------------ Segmentation ------------------
     print("\nSegmentation Report:")
@@ -98,6 +110,7 @@ def evaluate():
     # ------------------ Detection ------------------
     print("\nDetection Report:")
     print("Mean IoU:", np.mean(det_ious))
+
 
 if __name__ == "__main__":
     evaluate()

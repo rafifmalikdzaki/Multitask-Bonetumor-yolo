@@ -12,16 +12,20 @@ from pathlib import Path
 # ---------------------------------------------------------
 # Sub‑type ➜ benign / malignant / normal bins (from Yao 2025 paper)
 BENIGN_SUBTYPES = {
-    "osteochondroma", "multiple osteochondromas", "simple bone cyst",
-    "giant cell tumor", "synovial osteochondroma", "osteofibroma",
-    "other bt"
+    "osteochondroma",
+    "multiple osteochondromas",
+    "simple bone cyst",
+    "giant cell tumor",
+    "synovial osteochondroma",
+    "osteofibroma",
+    "other bt",
 }
 MALIGN_SUBTYPES = {"osteosarcoma", "other mt"}
 
 # CLS2ID = {"normal": 0, "B-tumor": 1, "M-tumor": 2}
 CLS2ID = {"B-tumor": 0, "M-tumor": 1}
-BOX2ID = {"B-tumor": 0, "M-tumor": 1}          # rectangles only
-MASK_VAL = {"B-tumor": 1, "M-tumor": 2}        # pixel values
+BOX2ID = {"B-tumor": 0, "M-tumor": 1}  # rectangles only
+MASK_VAL = {"B-tumor": 1, "M-tumor": 2}  # pixel values
 # ---------------------------------------------------------
 
 
@@ -32,8 +36,7 @@ def polygon_to_mask(poly, h, w, value):
     return mask
 
 
-def process_one(json_path: Path, out_det: Path, out_mask: Path,
-                global_cls: str):
+def process_one(json_path: Path, out_det: Path, out_mask: Path, global_cls: str):
     js = json.load(json_path.open())
     h, w = js["imageHeight"], js["imageWidth"]
 
@@ -46,8 +49,7 @@ def process_one(json_path: Path, out_det: Path, out_mask: Path,
         lbl = global_cls
 
         if sh["shape_type"] == "polygon" and lbl in MASK_VAL:
-            full_mask = np.maximum(full_mask,
-                                   polygon_to_mask(sh["points"], h, w, 1))
+            full_mask = np.maximum(full_mask, polygon_to_mask(sh["points"], h, w, 1))
 
         elif sh["shape_type"] == "rectangle" and lbl in BOX2ID:
             (x1, y1), (x2, y2) = sh["points"]
@@ -71,10 +73,13 @@ def process_one(json_path: Path, out_det: Path, out_mask: Path,
 #                zip(df['filename'], df['tumor_category'])}
 #     return mapping
 
+
 def build_type(xlsx: Path) -> dict:
     df = pd.read_excel(xlsx)
-    mapping = {Path(f).stem: "B-tumor" if b else "M-tumor" if t else "normal" for f, t, b in
-               zip(df['image_id'], df['tumor'], df['benign'])}
+    mapping = {
+        Path(f).stem: "B-tumor" if b else "M-tumor" if t else "normal"
+        for f, t, b in zip(df["image_id"], df["tumor"], df["benign"])
+    }
     return mapping
 
 
@@ -90,6 +95,7 @@ def subtype_to_global(subtype: str) -> str:
 # ---------------------------------------------------------
 def main():
     from tqdm import tqdm
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="BTXRD folder")
     ap.add_argument("--meta", required=True, help="dataset.xlsx")
@@ -99,34 +105,34 @@ def main():
 
     src = Path(args.src)
     dst = Path(args.dst)
-    (dst/"labels_det").mkdir(parents=True, exist_ok=True)
-    (dst/"masks").mkdir(parents=True, exist_ok=True)
-    (dst/"images").mkdir(parents=True, exist_ok=True)
+    (dst / "labels_det").mkdir(parents=True, exist_ok=True)
+    (dst / "masks").mkdir(parents=True, exist_ok=True)
+    (dst / "images").mkdir(parents=True, exist_ok=True)
 
     # subtype_map = build_subtype_lookup(args.meta)
     type_map = build_type(args.meta)
     img_cls_rows = []
 
-    json_files = sorted((src/"Annotations").glob("*.json"))
+    json_files = sorted((src / "Annotations").glob("*.json"))
     for js in tqdm(json_files):
         stem = js.stem
         # subtype = subtype_map.get(stem, "normal")
         type_cls = type_map.get(stem, "normal")
         # global_cls = subtype_to_global(subtype)
 
-        class_id = process_one(js,
-                               out_det=dst/"labels_det",
-                               out_mask=dst/"masks",
-                               global_cls=type_cls)
+        class_id = process_one(
+            js, out_det=dst / "labels_det", out_mask=dst / "masks", global_cls=type_cls
+        )
         # link image
-        img_src = src/"images"/f"{stem}{args.img_ext}"
-        img_dst = dst/"images"/img_src.name
-        if not img_dst.exists(): os.link(img_src, img_dst)
+        img_src = src / "images" / f"{stem}{args.img_ext}"
+        img_dst = dst / "images" / img_src.name
+        if not img_dst.exists():
+            os.link(img_src, img_dst)
 
         img_cls_rows.append([img_dst.name, class_id])
 
     # write image‑class CSV
-    with open(dst/"img_cls.csv", "w", newline="") as f:
+    with open(dst / "img_cls.csv", "w", newline="") as f:
         for row in img_cls_rows:
             f.write(f"{row[0]},{row[1]}\n")
 
