@@ -4,6 +4,7 @@ data/
 **/btxrd_ready/          
 checkpoints*/             
 wandb/                    
+*.zip
 
 # (optional but usually handy)
 *.ckpt                     
