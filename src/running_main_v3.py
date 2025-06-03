@@ -199,7 +199,7 @@ class MultiTaskLitModel(pl.LightningModule):
         self.val_seg_prec = BinaryPrecision(threshold=0.5, dist_sync_on_step=True)
         self.val_seg_rec = BinaryRecall(threshold=0.5, dist_sync_on_step=True)
         self.val_seg_acc = BinaryAccuracy(threshold=0.5, dist_sync_on_step=True)
-        self.val_seg_dice = DiceScore(num_classes=1, threshold=0.5, dist_sync_on_step=True) # num_classes=1 for binary dice
+        self.val_seg_dice = DiceScore(num_classes=1, dist_sync_on_step=True) # num_classes=1 for binary dice
         # <<< ADDED MeanAveragePrecision for Segmentation >>>
         # For binary segmentation, class_metrics=False is fine.
         # The metric will calculate mAP over IoU thresholds for the single foreground class.
